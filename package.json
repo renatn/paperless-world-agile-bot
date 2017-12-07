@@ -1,5 +1,5 @@
 {
-  "name": "Paperless World Agile Bot",
+  "name": "PaperlessWorldAgileBot",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -11,6 +11,9 @@
   "license": "ISC",
   "dependencies": {
     "dotenv": "^4.0.0",
-    "node-telegram-bot-api": "^0.29.0"
+    "firebase": "^4.6.0",
+    "grpc": "^1.7.2",
+    "node-telegram-bot-api": "^0.29.0",
+    "winston": "^3.0.0-rc1"
   }
 }

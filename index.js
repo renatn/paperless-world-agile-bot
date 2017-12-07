@@ -1,154 +1,176 @@
 const result = require('dotenv').config();
 if (result.error) {
-  throw result.error
+  throw result.error;
 }
 
-const { createLogger, format, transports } = require('winston');
-const { combine, timestamp, printf } = format;
+const { logger } = require('./logger');
+const storage = require('./storage');
 
 
-const myFormat = printf(info => {
-  return `${info.timestamp} ${info.level}: ${info.message}`;
-});
+const keyboard = [
+    [':) встреча прошла хорошо'], 
+    [':| встреча могла бы пройти лучше'], 
+    [':( встреча прошла плохо']
+];
 
-const logger = createLogger({
-  level: 'info',
-  format: combine(
-    timestamp(),
-    myFormat
-  ),
-  transports: [
-    new transports.Console(),    
-    new transports.File({ filename: 'error.log', level: 'error' }),
-    new transports.File({ filename: 'combined.log' })
-  ]
-});
 
 const TelegramBot = require('node-telegram-bot-api');
-const bot = new TelegramBot(process.env.TELEGRAM_API_KEY, { polling: true });
+const bot = new TelegramBot(process.env.TELEGRAM_API_KEY, { 
+    onlyFirstMatch: true,
+    polling: {
+        autoStart: false
+    }
+});
 
-let sprintId = 'Безбумажный мир. Спринт №5';
-let eventId = 'Stand Up';
-let processed = {};
-const storage = {};
-storage[sprintId] = {};
+let activeEventId = null;
 
-const users = [];
+
+const isGodMode = userId => (userId === 78986164 || userId === 368589191);
+
+const handleUnknowUser = msg => unknown => {
+    if (unknown) {
+        logger.info(`New user ${msg.from.first_name}`);
+        return storage.storeUser(msg.from);
+    }
+    if (!activeEventId) {
+        throw new Error('Воу воу воу, братан, я сообщу когда надо будет голосовать')
+    }     
+};
+
+const handleAlreadyVotedUser = msg => already => {
+    if (already) {
+        logger.info(`User ${username(msg.from)} already voted`);
+        throw new Error('Братан ты уже голосовал, дождись следующей церемонии');
+    }     
+};
+
+const handleDatabaseConnect = connected => {
+    if (connected) {
+        logger.info('Bot start polling...');
+        storage.getActiveEventId().then(eventId => {
+            activeEventId = eventId;
+            bot.startPolling();
+
+        });
+    } else {
+        logger.info('Bot stop polling!');
+        bot.stopPolling();        
+    }
+};
+
+const handleChangeActiveEvent = eventId => {
+    activeEventId = eventId;
+    logger.info(`Acitve Event ID ${activeEventId}`);
+};
+
+const notifyUsers = (msg, eventName) => users => {
+    logger.info(`Новая церемония ${eventName}`);
+    users.filter(user => user.id !== msg.from.id).forEach(user => {
+        bot.sendMessage(user.id, `Новая церемония *${eventName}*, время голосовать!`, {
+            parse_mode: 'Markdown',
+            reply_markup: {
+                keyboard,
+                one_time_keyboard: true
+            }            
+        });
+    });
+};
+
+
+storage.connect(handleDatabaseConnect);
 
 const username = from => `[${from.username}] ${from.first_name} ${from.last_name}`;
 
-const vote = (userId, username, choice, comment = '') => {
-    logger.info(`User ${username} vote ${choice}`);
 
-    const x = storage[sprintId][userId];
-    if (x) {
-        return;
+const handleStartCommand = msg => event => {
+    let godmode = '';
+    if (isGodMode(msg.from.id)) {
+        godmode = '*[GOD MODE]* ';
     }
 
-    storage[sprintId][userId] = {
-        state: 'VOTE',
-        choice,
-        comment,
-        username     
-    };
-};
-
-const comment = (userId, message) => {
-    const x = storage[sprintId][userId]; 
-    x.comment = x.comment + '\n' + message;
-    x.state = 'COMMENT';
-};
-
-
-bot.onText(/\/start/, (msg) => {
-    logger.info(JSON.stringify(msg));
-    
-    const x = storage[sprintId][msg.from.id];
-    if (x) {
-        logger.info(`User ${username(msg.from)} already voted`);
-        bot.sendMessage(msg.chat.id, 'Братан ты уже голосовал, дождись следующей церемонии');
-        return;
-    }
-   
-    bot.sendMessage(msg.chat.id, `${sprintId}. Как прошла церемония: *${eventId}*?`, {
+    bot.sendMessage(msg.chat.id, `${godmode}${msg.from.first_name}, как прошла церемония: *${event.name}*?`, {
         parse_mode: 'Markdown',
         reply_markup: {
-            keyboard: [
-                [':) встреча прошла хорошо'], 
-                [':| встреча могла бы пройти лучше'], 
-                [':( встреча прошла плохо']
-            ],
+            keyboard,
             one_time_keyboard: true
         }
     });
-    processed[msg.from.id] = true;
+};
+
+const handleStatsCommand = msg => event => {
+    storage.getEventVotes(activeEventId).then(votes => { 
+        let result = `*${event.name}*\n---\n`;
+        votes.forEach(vote => {
+            result += `*${vote.username}* проголосовал *${vote.choice}* > ${vote.comment} \n`;
+        })
+        bot.sendMessage(msg.chat.id, result, { parse_mode: 'Markdown' });
+    });
+};
+
+
+bot.onText(/\/start/, msg => {
+    logger.info(JSON.stringify(msg));
+    
+    storage.isUnknownUser(msg.from.id).then(handleUnknowUser(msg))
+    .then(() => storage.isUserAlreadyVoted(activeEventId, msg.from.id))
+    .then(handleAlreadyVotedUser(msg))
+    .then(() => storage.getEventById(activeEventId))
+    .then(handleStartCommand(msg))
+    .catch(e => {
+        bot.sendMessage(msg.chat.id, e.message);
+    }); 
 });
 
 
-bot.onText(/\/sprint (.+)/, (msg, match) => {
-    const sprint = match[1];
+bot.onText(/\/event (.+)/, (msg, match) => {
+    const eventName = match[1];
 
-    const x = storage[sprintId];
-    Object.keys(x).forEach(uid => {
-        const user = storage[sprintId][uid];
-        bot.sendMessage(uid, `Новая церемония ${sprint}, время голосовать!`, {
-            parse_mode: 'Markdown',
-            reply_markup: {
-                keyboard: [
-                    [':) встреча прошла хорошо'], 
-                    [':| встреча могла бы пройти лучше'], 
-                    [':( встреча прошла плохо']
-                ],
-                one_time_keyboard: true
-            }
-            
-        });
-    });
-
-    sprintId = sprint;
-    storage[sprintId] = {};
-    bot.sendMessage(msg.chat.id, `Новый спринт: ${sprintId}`);
+    return storage
+        .storeEvent(eventName)
+        .then(handleChangeActiveEvent)
+        .then(storage.getUsers)
+        .then(notifyUsers(msg, eventName));
 });
 
-bot.onText(/\/stats/, (msg, match) => {
-    const sprint = storage[sprintId];
-    const table = Object.keys(sprint).map(uid => {
-        const user = sprint[uid];
-        return `${user.username} проголосовал ${user.choice} - ${user.comment} `;
-    });
-
-    bot.sendMessage(msg.chat.id, JSON.stringify(table));
+bot.onText(/\/stats/, msg => {
+    storage.getEventById(activeEventId).then(handleStatsCommand(msg));
 });
 
 
 bot.onText(/:\).+/, msg => {
-    vote(msg.from.id, username(msg.from), ':)');
-    bot.sendMessage(msg.chat.id, 'Здорово! Хорошего дня!');
+    storage.storeVote(activeEventId, msg.from, ':)');
+    bot.sendMessage(msg.chat.id, 'Здорово! Хорошего дня!', {
+        reply_markup: {
+            hide_keyboard: true
+        }
+    });
 });
 
 
 bot.onText(/:\|.+/, msg => {
-    vote(msg.from.id, username(msg.from), ':|');
-    bot.sendMessage(msg.chat.id, "Прокомментируешь?");
+    storage.storeVote(activeEventId, msg.from, ':|');
+    bot.sendMessage(msg.chat.id, "Прокомментируешь?", {
+        reply_markup: {
+            hide_keyboard: true
+        }        
+    });
 });
 
 bot.onText(/:\(.+/, msg => {
-    vote(msg.from.id, username(msg.from), ':(');
-    bot.sendMessage(msg.chat.id, "Что пошло не так?");
+    storage.storeVote(activeEventId, msg.from, ':(');
+    bot.sendMessage(msg.chat.id, "Что пошло не так?", {
+        reply_markup: {
+            hide_keyboard: true
+        }        
+    });
 });
 
-
-bot.on('message', (msg) => {
-    const x = storage[sprintId][msg.from.id];
-    if (!x || x.state === 'COMMENT') {
-        logger.info(`User ${username(msg.from)} has not vote yet`);
-        return;
-    }
-
-
-    comment(msg.from.id, msg.text);
-
-    bot.sendMessage(msg.chat.id, "Спасибо!");
-
-    logger.info(JSON.stringify(storage));
+bot.onText(/.+/, msg => {
+    storage.isUserAlreadyVoted(activeEventId, msg.from.id).then(x => {
+        if (!x) {
+            return;
+        }
+        storage.storeComment(activeEventId, msg.from.id, msg.text);
+        bot.sendMessage(msg.chat.id, "Записал!");
+    });
 });
